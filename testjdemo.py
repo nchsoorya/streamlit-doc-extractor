@@ -51,6 +51,7 @@ SCHEMA = {
     "Country": "None",
     "Phone": "None",
     "Mobile": "None",
+    "Fax": "None",
     "Primary_Email": "None",
     "Education_History": [
         {
@@ -90,13 +91,16 @@ CATALYST_ORG = "914134238"
 MODEL_NAME = "VL-Qwen2.5-7B"
 CONSOLIDATION_MODEL_NAME = "crm-di-qwen_text_14b-fp8-it"
 
-CLIENT_ID = os.getenv("CLIENT_ID")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
+CLIENT_ID = "1000.6FIKU7IPS8MCUXWTL1KL0HZRTPS3RH"
+CLIENT_SECRET = "30bd0ff9f34a045bf722a5e05ef86cdca404f019bf"
+REFRESH_TOKEN = "1000.8fc334b0666d6bb8169c1901490da877.6ff370561224a35c62b23e37da45fd8f"
 
-MAX_OCR_WORKERS = 8
-MAX_CONSOLIDATION_WORKERS = 6
-CONSOLIDATION_BATCH_SIZE = 9
+OCR_MAX_WORKERS = 8
+CONSOLIDATION_MAX_WORKERS = 6
+CONSOLIDATION_BATCH_SIZE = 5
+
+# Toggle to show/hide the "Total Extraction Time" indicator in the UI.
+SHOW_EXTRACTION_TIME = False
 
 # Local folder (inside the project) where uploaded PDFs are persisted.
 LOCAL_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploaded_files")
@@ -160,6 +164,11 @@ FIELD MAPPING & NORMALIZATION:
 - If the text shows variants like "M", "Maschio", or "Masculino", change it to **Male**.
 - If the text shows variants like "F", "Femmina", or "Femenino", change it to **Female**.
 - If it cannot be determined or is missing, set it to `null`. Do not guess.
+
+## SALUTATION RULES
+- `Salutation` MUST be an actual honorific/title (e.g., "Mr", "Mrs", "Ms", "Dr", "Rev", "Fr", "Sr", "Sra", "Don", "Doña", "S.E.R. Mons.").
+- Do NOT misidentify prepositions, conjunctions, or connecting words (such as "Cum", "Et", "De", "Di", "Da", "Del", "Della", "Y", "And", "Con") as a salutation. If only such a word appears where a salutation would be expected, set `Salutation` to `null`.
+- If no explicit honorific/title is present in the text, set `Salutation` to `null`. Never guess.
 
 ## LANGUAGE RULES
 - `Primary_Language`: Detect the primary language the document itself is written in (e.g., "English", "Italian", "Spanish"). 
@@ -327,7 +336,7 @@ CONSOLIDATION_SYSTEM_PROMPT = f"""
     ## ADDRESS & CONTACT RULES (YEAR DRIVEN)
     The following fields MUST be decided strictly by the document year:
     - Street_Address, City, State_or_Province, Zip_or_Postal_Code, Country
-    - Phone, Mobile, Primary_Email
+    - Phone, Mobile, Fax, Primary_Email
 
     Conflict Rule: You MUST look at `Document_Year` in each page's Document_Metadata. Select these address and contact values exclusively from the page(s) matching the latest/most recent year **within this batch**.
 
@@ -410,7 +419,7 @@ FINAL_CONSOLIDATION_SYSTEM_PROMPT = f"""
     ## ADDRESS & CONTACT RULES (YEAR DRIVEN)
     The following fields MUST be decided strictly by document year:
     - Street_Address, City, State_or_Province, Zip_or_Postal_Code, Country
-    - Phone, Mobile, Primary_Email
+    - Phone, Mobile, Fax, Primary_Email
 
     Conflict Rule: Look at ALL `Document_Year` values across the metadata lists from every batch. Select these address and contact values exclusively from the batch(es) whose metadata list contains the latest/most recent year.
 
@@ -640,10 +649,11 @@ def _consolidate_batch(batch_index: int, batch_pages: list[dict], access_token: 
 def consolidate_jsons(page_jsons: list[dict]) -> dict:
     """
     Two-stage parallel consolidation:
-      1) Dynamically splits page JSONs evenly across available MAX_WORKERS 
-         to prevent single heavy bottleneck batches.
-      2) Makes ONE final LLM call that merges all batch-level responses into the
-         single final JSON.
+      1) Split page JSONs into batches of CONSOLIDATION_BATCH_SIZE and consolidate
+         each batch in parallel via the QuickML LLM. Each batch response keeps
+         `Document_Metadata` as a LIST of per-page metadata entries (logged to stdout).
+      2) Make ONE final LLM call that merges all batch-level responses into the
+         single final JSON (with Document_Metadata removed).
     """
     pure_data_payload = [p["data"] for p in page_jsons if "data" in p and "error" not in p["data"]]
 
@@ -652,43 +662,29 @@ def consolidate_jsons(page_jsons: list[dict]) -> dict:
         return {}
 
     access_token = get_zoho_access_token()
-    total_pages_count = len(pure_data_payload)
 
-    # ---- FAST PATH: Less than your gate threshold -> Direct Single Call ----
-    if total_pages_count < CONSOLIDATION_BATCH_SIZE:
-        print(f"Total pages ({total_pages_count}) < {CONSOLIDATION_BATCH_SIZE}. Skipping intermediary batching.")
-        batch_result = _consolidate_batch(0, pure_data_payload, access_token)
+    # ---- Stage 1: build batches of CONSOLIDATION_BATCH_SIZE pages ----
+    batches = [
+        pure_data_payload[i:i + CONSOLIDATION_BATCH_SIZE]
+        for i in range(0, len(pure_data_payload), CONSOLIDATION_BATCH_SIZE)
+    ]
+    print(
+        f"Running batched consolidation via Zoho QuickML "
+        f"({CONSOLIDATION_MODEL_NAME}): {len(batches)} batch(es) of up to "
+        f"{CONSOLIDATION_BATCH_SIZE} pages each..."
+    )
+
+    # Fast path: only one batch — no need for a second final call.
+    if len(batches) == 1:
+        batch_result = _consolidate_batch(0, batches[0], access_token)
         if isinstance(batch_result, dict):
             batch_result.pop("Document_Metadata", None)
         return batch_result
 
-    # ---- DYNAMIC BALANCING WORKER PATH ----
-    # Determine how many workers we need (never spin up more workers than total pages)
-    active_workers = min(total_pages_count, MAX_CONSOLIDATION_WORKERS)
-
-    # Calculate perfect base splits and distribute remainders smoothly
-    base_size = total_pages_count // active_workers
-    remainder = total_pages_count % active_workers
-
-    batches = []
-    start_idx = 0
-    
-    for i in range(active_workers):
-        # Evenly spread remaining pages across the first few threads
-        chunk_size = base_size + (1 if i < remainder else 0)
-        end_idx = start_idx + chunk_size
-        batches.append(pure_data_payload[start_idx:end_idx])
-        start_idx = end_idx
-
-    print(
-        f"Running dynamic even batching via Zoho QuickML ({CONSOLIDATION_MODEL_NAME}):\n"
-        f"Splitting {total_pages_count} pages across {len(batches)} workers evenly. "
-        f"Batch allocations: {[len(b) for b in batches]}"
-    )
-
-    # Run batches in parallel (HTTP I/O bound → thread pool handles synchronously).
+    # Run batches in parallel (HTTP I/O bound → thread pool is appropriate).
     batch_results: list[dict] = [None] * len(batches)  # type: ignore[list-item]
-    with ThreadPoolExecutor(max_workers=active_workers) as executor:
+    workers_count = max(1, min(len(batches), CONSOLIDATION_MAX_WORKERS))
+    with ThreadPoolExecutor(max_workers=workers_count) as executor:
         future_to_idx = {
             executor.submit(_consolidate_batch, idx, batch, access_token): idx
             for idx, batch in enumerate(batches)
@@ -701,7 +697,7 @@ def consolidate_jsons(page_jsons: list[dict]) -> dict:
                 print(f"  !! Batch #{idx + 1} consolidation failed: {e}")
                 batch_results[idx] = {}
 
-    # Filter out empty failures but keep indexing arrangement intact.
+    # Filter out empty failures but keep order.
     valid_batch_results = [b for b in batch_results if isinstance(b, dict) and b]
 
     if not valid_batch_results:
@@ -729,6 +725,7 @@ def consolidate_jsons(page_jsons: list[dict]) -> dict:
     print(f"{'=' * 65}\n")
 
     return final_result
+
 
 # =====================================================
 # PDF TO IMAGES CONVERSION
@@ -1035,6 +1032,7 @@ FIELD_LABELS = {
     "Country": "Country",
     "Phone": "Phone",
     "Mobile": "Mobile",
+    "Fax": "Fax",
     "Primary_Email": "Primary Email",
     "Personal_Email": "Personal Email",
     "Education_History": "Education History",
@@ -1053,7 +1051,7 @@ SECTION_GROUPS = {
     "Identity": ["Tax_Code", "Citizenship_Country", "Marital_Status"],
     "ID / Document": ["ID_Info", "Passport_Number", "ID_Card_Number", "Document_Issue_Date", "Document_Expiry_Date"],
     "Address & Contact": ["Street_Address", "City", "State_or_Province", "Zip_or_Postal_Code", "Country", "Phone",
-                          "Mobile", "Primary_Email"],
+                          "Mobile", "Fax", "Primary_Email"],
     "Education": ["Education_History", "School_Name", "Degree", "Education_Level"],
     "Languages": ["Primary_Language", "Languages"],
     "Religious Information": ["Diocese", "Bishop_Email", "Bishop_Name", "Seminary_Name", "Seminary_Address",
@@ -1230,7 +1228,7 @@ with right_col:
                 extracted_data = extract_from_image(path, access_token)
                 return {"page": index + 1, "file": file_name, "data": extracted_data}
 
-            workers_count = max(1, min(len(image_files), MAX_OCR_WORKERS))
+            workers_count = max(1, min(len(image_files), OCR_MAX_WORKERS))
             with ThreadPoolExecutor(max_workers=workers_count) as executor:
                 future_to_page = {
                     executor.submit(_ocr_thread_worker, i, file): i + 1
@@ -1307,7 +1305,7 @@ with right_col:
 
         # Display the total extraction time (OCR + consolidation pipeline).
         elapsed = st.session_state.get("extraction_elapsed")
-        if elapsed is not None:
+        if SHOW_EXTRACTION_TIME and elapsed is not None:
             mins, secs = divmod(elapsed, 60)
             if mins >= 1:
                 time_str = f"{int(mins)}m {secs:.1f}s"
@@ -1331,7 +1329,7 @@ with right_col:
             "Document_Issue_Date": "Data_di _emissione", "Document_Expiry_Date": "Data_di _scadenza",
             "Street_Address": "Mailing_Street", "City": "Mailing_City", "State_or_Province": "Mailing_State",
             "Zip_or_Postal_Code": "Mailing_Zip", "Country": "Mailing_Country",
-            "Phone": "Phone", "Mobile": "Mobile", "Primary_Email": "Email", "Personal_Email": "Email_personale",
+            "Phone": "Phone", "Mobile": "Mobile", "Fax": "Fax", "Primary_Email": "Email", "Personal_Email": "Email_personale",
             "Education_History": "Storia_istruzione", "School_Name": "School_Name", "Degree": "Degree",
             "Primary_Language": "Lingua", "Languages": "Lingue", "Education_Level": "Livello",
             "Diocese": "Diocesi", "Bishop_Email": "Email_del_Vescovo", "Bishop_Name": "S_E_R_Mons",
