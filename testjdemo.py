@@ -750,6 +750,11 @@ def pdf_to_images(pdf_path, output_folder="output_images", zoom=2):
 # =====================================================
 st.markdown("""
 <style>
+    html, body, .stApp, main, .main, .main .block-container, .block-container, [data-testid="stAppViewContainer"], [data-testid="stHeader"], [data-testid="stToolbar"] {
+        margin: 10px !important;
+        padding: 0px !important;
+        min-height: 10px !important;
+    }
     .stApp { background-color: #0B0F17; }
     .main .block-container {
         padding-top: 0rem !important;
@@ -759,9 +764,13 @@ st.markdown("""
         max-width: 1600px;
     }
 
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
+    #MainMenu, footer, header, [data-testid="stHeader"], [data-testid="stToolbar"] {
+        display: none !important;
+        visibility: hidden !important;
+        height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
 
     .header-bar {
         background: #111827;
@@ -771,6 +780,7 @@ st.markdown("""
         margin-bottom: 24px;
         box-shadow: 0px 4px 20px rgba(0, 0, 0, 0.2);
     }
+            
     .header-flex { display: flex; align-items: center; gap: 14px; }
     .header-icon { font-size: 50px; line-height: 1; }
     .header-title { font-size: 22px; font-weight: 700; color: #F8FAFC; margin: 0; line-height: 1.2; }
