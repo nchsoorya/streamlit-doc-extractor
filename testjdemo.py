@@ -91,9 +91,9 @@ CATALYST_ORG = "914134238"
 MODEL_NAME = "VL-Qwen2.5-7B"
 CONSOLIDATION_MODEL_NAME = "crm-di-qwen_text_14b-fp8-it"
 
-CLIENT_ID = os.getenv("CLIENT_ID")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
+CLIENT_ID = "1000.6FIKU7IPS8MCUXWTL1KL0HZRTPS3RH"
+CLIENT_SECRET = "30bd0ff9f34a045bf722a5e05ef86cdca404f019bf"
+REFRESH_TOKEN = "1000.8fc334b0666d6bb8169c1901490da877.6ff370561224a35c62b23e37da45fd8f"
 
 OCR_MAX_WORKERS = 8
 CONSOLIDATION_MAX_WORKERS = 6
@@ -137,6 +137,14 @@ ANTI-HALLUCINATION RULES:
 - Never promote academic labels into Education_Level.
 - Never expand religious movement names.
 
+
+- Before extracting Religious_Status, Marital_Status, Gender, Diocese status, enrollment type, or any multiple-choice field:
+1. Locate all available options.
+2. Locate all handwritten marks (X, ✓, ✔, crosses, circles).
+3. Match each mark to the nearest option.
+4. Extract only the marked option.
+5. Never choose an unmarked option when another option is marked.
+
 EDUCATION VERBATIM ENFORCEMENT:
 - School_Name must be copied EXACTLY as present in OCR output.
 - Do NOT correct spelling, capitalization, punctuation, or accents.
@@ -154,7 +162,7 @@ FIELD MAPPING & NORMALIZATION:
 - 'Cognome' -> Last_Name.
 - 'Nome' -> First_Name.
 - 'Stato civile' -> Marital_Status.
-- If marital value is 'Consagrada' or 'Consacrata', normalize exactly to 'Single (Consagrada)'.
+- Do not confuse 'Varon' as Martial_Status. 'Varon' is assigned for Gender
 - Normalize all HOME SCHOOLLED variants to exactly 'Home Schooled'.
 - Preserve original email spelling and date formatting.
 - Do NOT normalize date formats.
@@ -171,20 +179,17 @@ FIELD MAPPING & NORMALIZATION:
 - If no explicit honorific/title is present in the text, set `Salutation` to `null`. Never guess.
 
 ## LANGUAGE RULES
-- `Primary_Language`: Detect the primary language the document itself is written in (e.g., "English", "Italian", "Spanish"). 
-- `Languages`: Put that same detected language into this array as a single string (e.g., `["English"]`).
-- **Rule:** If the document has no readable text (only signatures or stamps), set `Primary_Language` to `null` and `Languages` to `[]`. Do not guess.
+- `Primary_Language`: Detect the dominant language of the page.
+- `Languages`: Extract all languages explicitly present in the page as unique values.
+- **Rule:** If the document has no readable text, set `Primary_Language` to `null` and `Languages` to `[]`. Do not guess.
 
 GEOGRAPHY RULES:
 Strictly never mention birth Country in place of street address.
 - (Strictly) If a birth city value is actually a country name (USA, India, France, Italy), move it to Birth_Country and set Birth_City=null.
-- States/provinces are NOT countries.
-- (Strictly) Never map values like 'Rhode Island', 'WV', 'OH', or 'Oregon' into Birth_Country.
-- (Strictly) Do not reuse address or school locations as birth data.
-- (Strictly) US states are NEVER countries.
-- (Strictly) (Examples: Oregon, Rhode Island, WV, OH are NOT Birth_Country.
-- (Strictly) Birth_City, Birth_Province_or_State, and Birth_Country MUST ONLY be extracted if the source text explicitly labels them as birth information (e.g., "Place of Birth", "Born at", "Nato a").
-- NEVER use a school location, current address, or document signing location to populate Birth_City, Birth_Province_or_State, or Birth_Country. If an explicit birth declaration is missing, these fields MUST be null.
+- Never populate `Birth_Province_or_State` from citizenship, nationality, residence, school, or incomplete OCR text; if the value is partial or unclear, return `null`.
+- `Birth_Country` must contain only a country name; never a city, state, province, region, county, nationality, or abbreviation.
+- `Citizenship_Country` must not be extracted from address or residence fields.
+- State_or_Province must be a location name only, never a ZIP/postal code, street address, phone number, country, or numeric value. If unclear, return null.
 
 GEOGRAPHY FIELD LOCK:## RESIDENTIAL ADDRESS RULES
 Extract address fields ONLY if explicitly labeled as a current, residential, or home address. Otherwise, leave them null.
@@ -193,22 +198,17 @@ Strictly split the address into these components:
 - `Street_Address`: Extract ONLY the house number, street name, apartment/suite number, and road name (e.g., "1601 Main Street"). Locally strip and REMOVE the city, state, ZIP code, and country from this specific field.
 - `City`: The city name only (e.g., "Wellsburg").
 - `State_or_Province`: The state or province name/abbreviation only (e.g., "WV").
-- `Zip_or_Postal_Code`: The postal/ZIP code number only (e.g., "26070").
+- `Zip_or_Postal_Code`: The postal/ZIP code number only.
 - `Country`: The country name only. Never put a country name inside the Street_Address field.
 - Birth_Country and Citizenship_Country must NEVER be auto-copied from each other.
 - (Strictly) Citizenship_Country requires explicit mention in OCR text.
 - Birth_Country must not be reused as fallback for missing Citizenship_Country.
 
-## STRICT BIRTH FIELD ISOLATION
-- Set `Birth_City`, `Birth_Province_or_State`, and `Birth_Country` to `null` unless explicitly labeled with terms like "Place of Birth", "Born at", or "Nato a".
-- **CRITICAL:** A country name (like "USA", "United States", "Italy", "France") is NEVER a city. If a country name is detected inside a birth city context, move it to `Birth_Country` and force `Birth_City = null`.
-- **CRITICAL:** NEVER use a School Name, School Address, or University location to fill birth details. If there is no explicit birth text, keep birth fields `null`.
-- `Birth_Country` and `Citizenship_Country` must never be copied from each other.
-
-BIRTH_COUNTRY ISOLATION RULE:
-- Birth_Country must ONLY be extracted from the subject's own explicitly stated birth place.
-- NEVER use Mother's Birth Place or Father's Birth Place to populate Birth_Country.
-- If the subject's own birth country is not explicitly present, set Birth_Country = null.
+## BIRTH FIELD RULES
+- Birth_City, Birth_Province_or_State, and Birth_Country must only be extracted from the subject's explicitly labeled birth information (e.g., "Place of Birth", "Born at", "Nato a").
+- Never populate birth fields from citizenship, nationality, address, residence, school, university, parent information, or document-signing locations.
+- If a birth value is missing, incomplete, OCR-corrupted, or unclear, return null.
+- If a birth city value is actually a country name, move it to Birth_Country and set Birth_City to null.
 
 STAMP & DECORATIVE TEXT IGNORE RULE:
 - Ignore stamps, seals, logos, watermarks
@@ -217,8 +217,11 @@ STAMP & DECORATIVE TEXT IGNORE RULE:
 ## EDUCATION RULES
 Extract education history into unique objects. Never infer or add fields outside the provided text.
 
-- `School_Name`: Must be a distinct academic institution (e.g., "IMMACULATE CONCEPTION ACADEMY", "Ateneo Pontificio Regina Apostolorum").
-- `Degree`: The exact degree name awarded (e.g., "Diploma", "Magisterio en Ciencias Religiosas").
+## EDUCATION RULES
+- If `Document_Type` is "Birth Certificate", do not extract `School_Name` or `Degree`; return `Education_History` as [].
+
+- `School_Name`: Must be a distinct academic institution.
+- `Degree`: The exact degree name awarded
 
 Strict Target Corrections:
 1. **Invalid Degree Text (Set Degree to null):** If the degree string matches variants of coursework tracking or generic years like "CICLO MAGISTERIO ANNO 3°", extract the `School_Name` but set `Degree = null`.
@@ -231,9 +234,9 @@ Strict Target Corrections:
 
 ## RELIGIOUS & DIOCESE RULES
 - `Diocese`: Extract the name of the diocese ONLY if it includes a real geographical city or place (e.g., "Diocese of Rome"). Never assign a religious movement name here.
-- `Religious_Order`: Extract explicit religious organizations or movements here. 
-  - **Normalization Rule:** If the text says "Movimiento de apostolado Regnum Christi" or any similar long variation, clean and shorten it to exactly **"Regnum Christi"**.
-- Only populate `Religious_Status` or `Religious_Order` if explicitly written in the text.
+- **Religious_Order:** Extract the exact religious organization or movement name as explicitly written in the text; do not normalize, shorten, or modify the name in any way.
+- **Single-selection rule:** If multiple options are present, select only one option indicated by a marker (tick, circle ○, cross ✗, or any explicit selection mark).
+- Only the option with a directly attached selection mark may be selected. Ignore all unmarked options even if they appear more relevant. Never infer selection from context or surrounding text.
 
 ## DATE & DOCUMENT LOCK RULES (CRITICAL)
 - `Document_Type`: Must be exactly one of: [Birth Certificate, Passport, Education Certificate, Identification Proof, Religious Record, Applications Form, Other].
@@ -328,7 +331,7 @@ CONSOLIDATION_SYSTEM_PROMPT = f"""
     - Use normalized School_Name as key
     - If multiple entries share same key:
         - Keep record with non-null fields
-        - **Degree Consolidation Rule:** If duplicate entries exist for the same school, always prefer and keep the record with the longer, more complete, and descriptive `Degree` string (e.g., keep "Magisterio en Ciencias Religiosas" over just "Magisterio"). Drop the shorter or less descriptive duplicate.
+        - **Degree Consolidation Rule:** If duplicate entries exist for the same school, always prefer and keep the record with the longer, more complete, and descriptive `Degree` string. Drop the shorter or less descriptive duplicate.
         - Never output both duplicates
     - Remove entries where School_Name AND Degree are null
     - **Education_Level Rule:** Look at all `Degree` values in the final `Education_History` array and set `Education_Level` to match the single highest qualification found.
@@ -415,6 +418,7 @@ FINAL_CONSOLIDATION_SYSTEM_PROMPT = f"""
         - Never output both duplicates
     - Remove entries where School_Name AND Degree are null
     - **Education_Level Rule:** Look at all `Degree` values in the final `Education_History` array and set `Education_Level` to match the single highest qualification found.
+    - Degrees that represent academic years, course levels, study cycles, semesters, grades, or progression labels (e.g., "5 CURSO", "3° ANNO", "ANNO IV", "SEMESTRE 2", "YEAR 5") are invalid and must be treated as null.
 
     ## ADDRESS & CONTACT RULES (YEAR DRIVEN)
     The following fields MUST be decided strictly by document year:
@@ -588,8 +592,10 @@ def extract_from_image(image_path: str, access_token: str) -> dict:
     response = requests.post(VLM_URL, json=payload, headers=headers, timeout=300)
     result = response.json()
 
+    ocr_text = result.get("response", "")    
+
     # Parse the raw response to dictionary
-    parsed_json = parse_model_json(result.get("response", ""))
+    parsed_json = parse_model_json(ocr_text)
 
     # --- TERMINAL PRINT ADDITION ---
     page_name = os.path.basename(image_path)
@@ -750,11 +756,6 @@ def pdf_to_images(pdf_path, output_folder="output_images", zoom=2):
 # =====================================================
 st.markdown("""
 <style>
-    html, body, .stApp, main, .main, .main .block-container, .block-container, [data-testid="stAppViewContainer"], [data-testid="stHeader"], [data-testid="stToolbar"] {
-        margin: 10px !important;
-        padding: 0px !important;
-        min-height: 10px !important;
-    }
     .stApp { background-color: #0B0F17; }
     .main .block-container {
         padding-top: 0rem !important;
@@ -764,13 +765,9 @@ st.markdown("""
         max-width: 1600px;
     }
 
-    #MainMenu, footer, header, [data-testid="stHeader"], [data-testid="stToolbar"] {
-        display: none !important;
-        visibility: hidden !important;
-        height: 0 !important;
-        margin: 0 !important;
-        padding: 0 !important;
-    }
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
 
     .header-bar {
         background: #111827;
@@ -780,7 +777,6 @@ st.markdown("""
         margin-bottom: 24px;
         box-shadow: 0px 4px 20px rgba(0, 0, 0, 0.2);
     }
-            
     .header-flex { display: flex; align-items: center; gap: 14px; }
     .header-icon { font-size: 50px; line-height: 1; }
     .header-title { font-size: 22px; font-weight: 700; color: #F8FAFC; margin: 0; line-height: 1.2; }
@@ -1391,4 +1387,3 @@ with right_col:
             # File uploaded but still inside the 10-second preview loader window.
             # Keep the right panel intentionally quiet — the left-side spinner is the only status.
             pass
-
